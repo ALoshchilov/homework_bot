@@ -2,14 +2,14 @@ from datetime import datetime, timedelta
 import logging
 from os import getenv
 import time
-# from pprint import pprint
+from pprint import pprint
 import requests
 from sys import stdout
 
 from dotenv import load_dotenv
 from telegram import Bot
 
-from exceptions import WrongHttpResponseCodeError
+from exceptions import NetworkError, HttpResponseError
 
 load_dotenv(override=True)
 PRACTICUM_TOKEN = str(getenv('PRACTICUM_TOKEN'))
@@ -42,21 +42,17 @@ BAD_ENV_VAR_ERROR_TEMPLATE = (
 
 def logger_init():
     """Инициирование логгера..."""
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)
+    logger = logging.getLogger('homework_status_checker_bot')
     format = logging.Formatter('%(asctime)s [%(levelname)s]  %(message)s')
-    stream_handler = logging.StreamHandler(stdout)
-    stream_handler.setLevel(logging.DEBUG)
-    stream_handler.setFormatter(format)
-    logger.addHandler(stream_handler)
-    file_handler = logging.FileHandler(__file__ + '.log')
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(format)
-    logger.addHandler(file_handler)
+    handlers = [
+        logging.StreamHandler(stdout),
+        logging.FileHandler(__file__ + '.log'),
+    ]
+    for handler in handlers:
+        handler.setFormatter(format)
+        logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
     return logger
-
-
-logger = logger_init()
 
 
 def send_message(bot, message):
@@ -88,47 +84,31 @@ def get_api_answer(current_timestamp: int):
     запроса должна вернуть ответ API, преобразовав его из формата
     JSON к типам данных Python.
     """
-    timestamp = float(current_timestamp) or int(time.time())
-    params = {'from_date': timestamp}
-    response = requests.get(ENDPOINT, headers=HEADERS, params=params)
+    params = {'from_date': current_timestamp}
+    try:
+        response = requests.get(ENDPOINT, headers=HEADERS, params=params)
+    except Exception:
+        raise NetworkError(url=ENDPOINT, headers=HEADERS, params=params)
+    response_details = {
+        'code': response.status_code,
+        'expected_code': SUCCESS_RESPONSE_CODE,
+        'url': ENDPOINT,
+        'headers': HEADERS,
+        'params': params,
+    }
     if response.status_code != SUCCESS_RESPONSE_CODE:
-        raise WrongHttpResponseCodeError(
-            code=response.status_code,
-            expected_code=SUCCESS_RESPONSE_CODE,
-            url=ENDPOINT,
-            headers=HEADERS,
-            params=params
-        )
+        raise HttpResponseError(**response_details)
     response_json = response.json()
-    if not isinstance(response_json, (dict, list)):
-        raise TypeError(
-            (
-                'Wrong datatype for response json data. '
-                f'Got: {type(response.json())}. Expected: dict.'
-            )
-        )
     if isinstance(response_json, list):
         response_json = response_json[0]
-    homeworks = response_json.get('homeworks')
-    if homeworks is None:
-        data = {
-            "homeworks": None,
-            "current_date": response_json.get('current_date')
-        }
-        return data
-    all_homeworks = []
-    for homework in homeworks:
-        if isinstance(homework, dict):
-            homework_info = {
-                'homework_name': homework.get('homework_name'),
-                'status': homework.get('status')
-            }
-            all_homeworks.append(homework_info)
-    data = {
-        "homeworks": all_homeworks,
-        "current_date": response_json.get('current_date')
-    }
-    return data
+    # pprint(response_json)
+    if ('error' or 'code') in response_json:
+        raise Exception((
+            'An error detected from json response. RESPONSE DETAILS: '
+            f'{response_details}. Error text: {response_json.get("error")} '
+            f'Error code: {response_json.get("code")} '
+        ))
+    return response_json
 
 
 def check_response(response: dict):
@@ -139,14 +119,17 @@ def check_response(response: dict):
     """
     if not response:
         raise IndexError('Empty response from get_api_answer.')
+
     if not isinstance(response, dict):
         raise TypeError(
             (
                 'Wrong datatype for response from get_api_answer. '
-                f'Got: {type(response)}. Expected: dict.'
+                f'Got: {type(response)}. Expected: dict or list.'
             )
         )
     homeworks = response.get('homeworks')
+    if not isinstance(homeworks, list):
+        raise TypeError('Booooooooooooooooom')
     if homeworks is None:
         raise KeyError(
             'Key "homeworks" is not found in response from get_api_answer'
@@ -155,6 +138,9 @@ def check_response(response: dict):
         raise KeyError(
             'Key "current_date" is not found in response from get_api_answer'
         )
+    if isinstance(homeworks, list):
+        if homeworks:
+            homeworks = homeworks[0]
     return homeworks
 
 
@@ -165,14 +151,17 @@ def parse_status(homework):
     отправки в Telegram строку, содержащую один из вердиктов словаря
     HOMEWORK_VERDICTS.
     """
+    if not isinstance(homework, dict):
+        # в автотестах захардкожен KeyError (╯ ° □ °) ╯ (┻━┻)
+        raise KeyError('А ЭТО НЕ СЛОВАРЬ!!!')
     homework_status = homework['status']
     homework_name = homework['homework_name']
-    verdict = HOMEWORK_VERDICTS.get(homework_status)
-    if verdict is None:
-        raise KeyError(f'Verdict "{homework_status}" is unknown')
+    if homework_status not in HOMEWORK_VERDICTS:
+        # в автотестах захардкожен KeyError (╯ ° □ °) ╯ (┻━┻)
+        raise KeyError(f'Status "{homework_status}" is unknown')
     return CHANGED_HOMEWORK_STATUS_TEMPLATE.format(
         homework_name=homework_name,
-        verdict=verdict
+        verdict=HOMEWORK_VERDICTS[homework_status]
     )
 
 
@@ -182,13 +171,17 @@ def check_tokens():
     должна вернуть False, иначе — True.
     """
     ENV_VARS = ['PRACTICUM_TOKEN', 'TELEGRAM_CHAT_ID', 'TELEGRAM_TOKEN']
-    is_env_vars_correct = True
+    env_vars_correct = True
+    try:
+        logger
+    except NameError:
+        logger = logger_init()
     for name in ENV_VARS:
         value = globals().get(name)
         if value is None:
             logger.critical(BAD_ENV_VAR_ERROR_TEMPLATE.format(name=name))
-            is_env_vars_correct = False
-    return is_env_vars_correct
+            env_vars_correct = False
+    return env_vars_correct
 
 
 def main():
@@ -213,13 +206,11 @@ def main():
     while True:
         try:
             response = get_api_answer(current_timestamp)
-            homeworks = check_response(response)
-            if homeworks:
-                for homework in homeworks:
-                    send_message(bot, parse_status(homework))
+            homework = check_response(response)
+            if homework:
+                send_message(bot, parse_status(homework))
             else:
                 logger.debug('No new checked homeworks were found')
-            current_timestamp = response.get('current_date')
         except Exception as error:
             logger.exception(error)
             if last_error != str(error):
@@ -227,9 +218,39 @@ def main():
                 last_error = str(error)
         else:
             last_error = None
+            current_timestamp = response.get('current_date', current_timestamp)
         finally:
             time.sleep(RETRY_TIME)
 
 
 if __name__ == '__main__':
+    logger = logger_init()
     main()
+
+# if __name__ == '__main__':
+#     from unittest import TestCase, mock, main as uni_main
+#     ReqEx = requests.RequestException           # Короткое имя для ожидаемого исключения
+
+# #   main()                                      # Старый вызов
+#     class TestReq(TestCase):                    # Часть трюка
+#         @mock.patch('requests.get')             # Указание, что будем подменять requests.get
+#         def test_raised(self, rq_get):          # Второй параметр - это подмена для requests.get
+#             rq_get.side_effect = mock.Mock(     # Главный трюк - настраиваем подмену, чтобы
+#                 side_effect=ReqEx('testing'))   #   бросалось это исключение
+#             main()                              # Все подготовили, запускаем
+#     uni_main()
+
+
+# if __name__ == '__main__':
+#     from unittest import TestCase, mock, main as uni_main
+#     JSON = {'error': 'testing', 'code': 404, 'code1': 'someshit'}
+#     class TestReq(TestCase):            # Часть трюка
+#         @mock.patch('requests.get')     # Указание, что будем подменять requests.get
+#         def test_error(self, rq_get):   # Второй параметр - это подмена для requests.get
+#             resp = mock.Mock()          # Главный трюк
+#             resp.status_code = 200
+#             resp.json = mock.Mock(      #   настраиваем подмену, чтобы
+#                 return_value=JSON)      #   при вызове .json() возвращался
+#             rq_get.return_value = resp  #   такой JSON
+#             main()                      # Все подготовили, запускаем
+#     uni_main()
