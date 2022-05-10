@@ -55,6 +55,9 @@ def logger_init():
     return logger
 
 
+logger = logger_init()
+
+
 def send_message(bot, message):
     """
     Отправляет сообщение в Telegram чат, определяемый переменной окружения...
@@ -98,17 +101,7 @@ def get_api_answer(current_timestamp: int):
     }
     if response.status_code != SUCCESS_RESPONSE_CODE:
         raise HttpResponseError(**response_details)
-    response_json = response.json()
-    if isinstance(response_json, list):
-        response_json = response_json[0]
-    # pprint(response_json)
-    if ('error' or 'code') in response_json:
-        raise Exception((
-            'An error detected from json response. RESPONSE DETAILS: '
-            f'{response_details}. Error text: {response_json.get("error")} '
-            f'Error code: {response_json.get("code")} '
-        ))
-    return response_json
+    return response.json()
 
 
 def check_response(response: dict):
@@ -120,16 +113,27 @@ def check_response(response: dict):
     if not response:
         raise IndexError('Empty response from get_api_answer.')
 
+    if isinstance(response, list):
+        response = response[0]
+    if ('error' or 'code') in response:
+        raise Exception((
+            'Json response points to an error. RESPONSE DETAILS: '
+            f'Error text: {response.get("error")} '
+            f'Error code: {response.get("code")} '
+        ))
+
     if not isinstance(response, dict):
-        raise TypeError(
-            (
-                'Wrong datatype for response from get_api_answer. '
-                f'Got: {type(response)}. Expected: dict or list.'
-            )
-        )
+        raise TypeError((
+            'Wrong datatype for response from get_api_answer. '
+            f'Got: {type(response)}. Expected: dict.'
+        ))
     homeworks = response.get('homeworks')
+    # Вот с этим говном не забыть разобраться
     if not isinstance(homeworks, list):
-        raise TypeError('Booooooooooooooooom')
+        raise TypeError((
+            'Wrong datatype for homeworks info. '
+            f'Got: {type(homeworks)}. Expected: list.'
+        ))
     if homeworks is None:
         raise KeyError(
             'Key "homeworks" is not found in response from get_api_answer'
@@ -153,7 +157,10 @@ def parse_status(homework):
     """
     if not isinstance(homework, dict):
         # в автотестах захардкожен KeyError (╯ ° □ °) ╯ (┻━┻)
-        raise KeyError('А ЭТО НЕ СЛОВАРЬ!!!')
+        raise KeyError(
+            f'parse_status arg type is {type(homework)}'
+            'expected dict'
+        )
     homework_status = homework['status']
     homework_name = homework['homework_name']
     if homework_status not in HOMEWORK_VERDICTS:
@@ -172,10 +179,6 @@ def check_tokens():
     """
     ENV_VARS = ['PRACTICUM_TOKEN', 'TELEGRAM_CHAT_ID', 'TELEGRAM_TOKEN']
     env_vars_correct = True
-    try:
-        logger
-    except NameError:
-        logger = logger_init()
     for name in ENV_VARS:
         value = globals().get(name)
         if value is None:
@@ -224,7 +227,6 @@ def main():
 
 
 if __name__ == '__main__':
-    logger = logger_init()
     main()
 
 # if __name__ == '__main__':
