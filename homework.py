@@ -1,9 +1,8 @@
 from datetime import datetime, timedelta
 import logging
 from os import getenv
-import time
-from pprint import pprint
 import requests
+import time
 from sys import stdout
 
 from dotenv import load_dotenv
@@ -15,7 +14,7 @@ load_dotenv(override=True)
 PRACTICUM_TOKEN = str(getenv('PRACTICUM_TOKEN'))
 TELEGRAM_TOKEN = str(getenv('TELEGRAM_TOKEN'))
 TELEGRAM_CHAT_ID = getenv('TELEGRAM_CHAT_ID')
-RETRY_TIME = 20
+RETRY_TIME = 600
 SUCCESS_RESPONSE_CODE = 200
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
@@ -24,6 +23,7 @@ HOMEWORK_VERDICTS = {
     'reviewing': 'Работа взята на проверку ревьюером.',
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
+LOG_PATH = __file__ + '.log'
 # Шаблоны сообщений и записей лога
 OK_SEND_MESSAGE_TEMPLATE = (
     'Message: "{message}" successfully send '
@@ -38,24 +38,29 @@ CHANGED_HOMEWORK_STATUS_TEMPLATE = (
 BAD_ENV_VAR_ERROR_TEMPLATE = (
     'Unexisting or empty environment variable ({name}) was found'
 )
+WRONG_TYPE_MESSAGE_TEMPLATE = (
+    'Wrong datatype for {object} '
+    'Got: {got}. Expected: {expected}.'
+)
+UNKNOWN_HOMEWORK_STATUS_TEMPLATE = 'Status "{homework_status}" is unknown'
+STOP_BOT_MESSAGE = 'Stoping bot...'
+START_BOT_MESSAGE = 'Starting bot...'
+BOT_INIT_ERR_MESSAGE = 'Error durining bot initializing. Check telegram token'
+NO_CHECKED_WORKS_MESSAGE = 'No new checked homeworks were found'
+NO_GET_API_ANSWER_RESPONSE = 'Empty response from get_api_answer.'
 
 
 def logger_init():
-    """Инициирование логгера..."""
-    logger = logging.getLogger('homework_status_checker_bot')
-    format = logging.Formatter('%(asctime)s [%(levelname)s]  %(message)s')
+    """Инициализация настроек логирования..."""
     handlers = [
         logging.StreamHandler(stdout),
-        logging.FileHandler(__file__ + '.log'),
+        logging.FileHandler(LOG_PATH),
     ]
-    for handler in handlers:
-        handler.setFormatter(format)
-        logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-    return logger
-
-
-logger = logger_init()
+    logging.basicConfig(
+        format='%(asctime)s [%(levelname)s]  %(message)s',
+        level=logging.DEBUG,
+        handlers=handlers,
+    )
 
 
 def send_message(bot, message):
@@ -69,12 +74,12 @@ def send_message(bot, message):
             chat_id=TELEGRAM_CHAT_ID,
             text=message,
         )
-        logger.info(OK_SEND_MESSAGE_TEMPLATE.format(
+        logging.info(OK_SEND_MESSAGE_TEMPLATE.format(
             message=message,
             chat_id=TELEGRAM_CHAT_ID
         ))
     except Exception:
-        logger.exception(BAD_SEND_MESSAGE_TEMPLATE.format(
+        logging.exception(BAD_SEND_MESSAGE_TEMPLATE.format(
             message=message,
             chat_id=TELEGRAM_CHAT_ID
         ))
@@ -101,6 +106,10 @@ def get_api_answer(current_timestamp: int):
     }
     if response.status_code != SUCCESS_RESPONSE_CODE:
         raise HttpResponseError(**response_details)
+    if isinstance(response, list):
+        response = response[0]
+    if ('error' or 'code') in response.json():
+        raise HttpResponseError(**response_details)
     return response.json()
 
 
@@ -111,40 +120,18 @@ def check_response(response: dict):
     (он может быть и пустым), доступный в ответе API по ключу 'homeworks'
     """
     if not response:
-        raise IndexError('Empty response from get_api_answer.')
-
-    if isinstance(response, list):
-        response = response[0]
-    if ('error' or 'code') in response:
-        raise Exception((
-            'Json response points to an error. RESPONSE DETAILS: '
-            f'Error text: {response.get("error")} '
-            f'Error code: {response.get("code")} '
-        ))
-
-    if not isinstance(response, dict):
-        raise TypeError((
-            'Wrong datatype for response from get_api_answer. '
-            f'Got: {type(response)}. Expected: dict.'
-        ))
-    homeworks = response.get('homeworks')
-    # Вот с этим говном не забыть разобраться
+        raise IndexError(NO_GET_API_ANSWER_RESPONSE)
+    homeworks = response['homeworks']
     if not isinstance(homeworks, list):
-        raise TypeError((
-            'Wrong datatype for homeworks info. '
-            f'Got: {type(homeworks)}. Expected: list.'
+        raise TypeError(WRONG_TYPE_MESSAGE_TEMPLATE.format(
+            object='homeworks info',
+            got=type(response),
+            expected='dict'
         ))
-    if homeworks is None:
-        raise KeyError(
-            'Key "homeworks" is not found in response from get_api_answer'
-        )
-    if response.get('current_date') is None:
-        raise KeyError(
-            'Key "current_date" is not found in response from get_api_answer'
-        )
-    if isinstance(homeworks, list):
-        if homeworks:
-            homeworks = homeworks[0]
+    # проверка current_date
+    response['current_date']
+    if homeworks:
+        homeworks = homeworks[0]
     return homeworks
 
 
@@ -156,16 +143,17 @@ def parse_status(homework):
     HOMEWORK_VERDICTS.
     """
     if not isinstance(homework, dict):
-        # в автотестах захардкожен KeyError (╯ ° □ °) ╯ (┻━┻)
-        raise KeyError(
-            f'parse_status arg type is {type(homework)}'
-            'expected dict'
-        )
+        raise KeyError(WRONG_TYPE_MESSAGE_TEMPLATE.format(
+            object='parse_status argument',
+            got=type(homework),
+            expected='dict'
+        ))
     homework_status = homework['status']
     homework_name = homework['homework_name']
     if homework_status not in HOMEWORK_VERDICTS:
-        # в автотестах захардкожен KeyError (╯ ° □ °) ╯ (┻━┻)
-        raise KeyError(f'Status "{homework_status}" is unknown')
+        raise KeyError(UNKNOWN_HOMEWORK_STATUS_TEMPLATE.format(
+            homework_status=homework_status
+        ))
     return CHANGED_HOMEWORK_STATUS_TEMPLATE.format(
         homework_name=homework_name,
         verdict=HOMEWORK_VERDICTS[homework_status]
@@ -182,29 +170,26 @@ def check_tokens():
     for name in ENV_VARS:
         value = globals().get(name)
         if value is None:
-            logger.critical(BAD_ENV_VAR_ERROR_TEMPLATE.format(name=name))
+            logging.critical(BAD_ENV_VAR_ERROR_TEMPLATE.format(name=name))
             env_vars_correct = False
     return env_vars_correct
 
 
 def main():
     """Основная логика работы бота..."""
-    logger.info('Starting bot...')
+    logging.info(START_BOT_MESSAGE)
     if not check_tokens():
-        logger.info('Stoping bot...')
+        logging.info(STOP_BOT_MESSAGE)
         exit()
     try:
         bot = Bot(token=TELEGRAM_TOKEN)
     except Exception:
-        logger.critical(
-            'Error durining bot initializing. Check telegram token'
-        )
-        logger.info('Stoping bot...')
+        logging.critical(BOT_INIT_ERR_MESSAGE)
+        logging.info(STOP_BOT_MESSAGE)
         exit()
     last_error = None
     current_timestamp = int(
-        # (datetime.today() - timedelta(seconds=RETRY_TIME)).timestamp()
-        (datetime.today() - timedelta(days=90)).timestamp()
+        (datetime.today() - timedelta(seconds=RETRY_TIME)).timestamp()
     )
     while True:
         try:
@@ -212,10 +197,8 @@ def main():
             homework = check_response(response)
             if homework:
                 send_message(bot, parse_status(homework))
-            else:
-                logger.debug('No new checked homeworks were found')
         except Exception as error:
-            logger.exception(error)
+            logging.exception(error)
             if last_error != str(error):
                 send_message(bot, str(error))
                 last_error = str(error)
@@ -227,32 +210,5 @@ def main():
 
 
 if __name__ == '__main__':
+    logger_init()
     main()
-
-# if __name__ == '__main__':
-#     from unittest import TestCase, mock, main as uni_main
-#     ReqEx = requests.RequestException           # Короткое имя для ожидаемого исключения
-
-# #   main()                                      # Старый вызов
-#     class TestReq(TestCase):                    # Часть трюка
-#         @mock.patch('requests.get')             # Указание, что будем подменять requests.get
-#         def test_raised(self, rq_get):          # Второй параметр - это подмена для requests.get
-#             rq_get.side_effect = mock.Mock(     # Главный трюк - настраиваем подмену, чтобы
-#                 side_effect=ReqEx('testing'))   #   бросалось это исключение
-#             main()                              # Все подготовили, запускаем
-#     uni_main()
-
-
-# if __name__ == '__main__':
-#     from unittest import TestCase, mock, main as uni_main
-#     JSON = {'error': 'testing', 'code': 404, 'code1': 'someshit'}
-#     class TestReq(TestCase):            # Часть трюка
-#         @mock.patch('requests.get')     # Указание, что будем подменять requests.get
-#         def test_error(self, rq_get):   # Второй параметр - это подмена для requests.get
-#             resp = mock.Mock()          # Главный трюк
-#             resp.status_code = 200
-#             resp.json = mock.Mock(      #   настраиваем подмену, чтобы
-#                 return_value=JSON)      #   при вызове .json() возвращался
-#             rq_get.return_value = resp  #   такой JSON
-#             main()                      # Все подготовили, запускаем
-#     uni_main()
