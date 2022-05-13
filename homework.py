@@ -14,7 +14,7 @@ PRACTICUM_TOKEN = getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = getenv('TELEGRAM_CHAT_ID')
 ENV_VARS = ['PRACTICUM_TOKEN', 'TELEGRAM_CHAT_ID', 'TELEGRAM_TOKEN']
-RETRY_TIME = 15
+RETRY_TIME = 600
 SUCCESS_RESPONSE_CODE = 200
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
@@ -74,7 +74,7 @@ START_BOT_MESSAGE = 'Starting bot...'
 def logger_init():
     """Инициализация настроек логирования..."""
     handlers = [
-        #logging.StreamHandler(stdout),
+        logging.StreamHandler(stdout),
         logging.FileHandler(LOG_PATH),
     ]
     logging.basicConfig(
@@ -165,7 +165,7 @@ def check_response(response: dict):
     if not isinstance(homeworks, list):
         raise TypeError(WRONG_TYPE_MESSAGE_TEMPLATE.format(
             object='homeworks info',
-            got=type(response),
+            got=type(homeworks),
             expected='list'
         ))
     return homeworks
@@ -178,7 +178,8 @@ def parse_status(homework):
     отправки в Telegram строку, содержащую один из вердиктов словаря
     HOMEWORK_VERDICTS.
     """
-    print(homework)
+    if isinstance(homework, list):
+        homework = homework[0]
     homework_status = homework['status']
     homework_name = homework['homework_name']
     if homework_status not in HOMEWORK_VERDICTS:
@@ -215,7 +216,7 @@ def main():
     bot = Bot(token=TELEGRAM_TOKEN)
     last_error = None
     current_timestamp = int(
-        (datetime.today() - timedelta(days=30)).timestamp()
+        (datetime.today() - timedelta(seconds=RETRY_TIME)).timestamp()
     )
     while True:
         try:
