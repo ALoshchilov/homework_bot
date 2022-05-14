@@ -1,4 +1,3 @@
-from datetime import datetime, timedelta
 import logging
 from os import getenv
 from sys import stdout
@@ -7,6 +6,8 @@ import time
 from dotenv import load_dotenv
 import requests
 from telegram import Bot
+
+from exceptions import JsonDetectedResponseError, WrongHttpCodeError
 
 
 load_dotenv(override=True)
@@ -26,7 +27,7 @@ HOMEWORK_VERDICTS = {
 LOG_PATH = __file__ + '.log'
 # Шаблоны сообщений и записей лога
 BAD_ENV_VAR_ERROR_TEMPLATE = (
-    'Unexisting or empty environment variable ({name}) was found'
+    'Unexisting or empty environment variables were found: {vars}'
 )
 BAD_SEND_MESSAGE_TEMPLATE = (
     'Cannot send message: "{message}" to chat ({chat_id}). Error: {error}.'
@@ -36,18 +37,21 @@ CHANGED_HOMEWORK_STATUS_TEMPLATE = (
 )
 CONNECTION_ERROR_TEMPLATE = (
     'An error occured during request {url}.'
-    'DETAILS. Headers: {headers}. Params: {params}'
+    'DETAILS. Headers: {headers}. Params: {params}. '
+    'Error message: {error}'
+)
+LAST_FRONTIER_ERROR_TEMPLATE = (
+    'An exception {exception_type} was caught during the itteration. '
+    f'Details is in the server log "{LOG_PATH}".'
 )
 OK_SEND_MESSAGE_TEMPLATE = (
     'Message: "{message}" successfully send to chat ({chat_id})'
 )
 RESPONSE_ERROR_IN_JSON_TEMPLATE = (
     'An error was found in json response from {url} '
-    'DETAILS: Response code got: {code} expected: {expected_code} '
-    'Headers: {headers}. Parameters: {params} '
-    'The error detected in key: {error_key}. Error description: "{error_text}"'
+    'DETAILS: Headers: {headers}. Parameters: {params} '
+    'The error detected in key: {error_key}. Error description: "{error}"'
 )
-STOP_BOT_TEMPLATE = ' Stoping bot... Reasone: {reasone}'
 UNKNOWN_HOMEWORK_STATUS_TEMPLATE = 'Status "{homework_status}" is unknown'
 WRONG_HTTP_RESPONSE_ERROR_TEMPLATE = (
     'Wrong HTTP response code from {url}. '
@@ -60,27 +64,27 @@ WRONG_TYPE_MESSAGE_TEMPLATE = (
 )
 
 BOT_INIT_ERR_MESSAGE = 'Error durining bot initializing. Check telegram token'
-LAST_FRONTIER_ERROR = (
-    'An error ocurred during the itteration. Details is below in the log:'
-)
 NO_CHECKED_WORKS_MESSAGE = 'No new checked homeworks were found'
-NO_GET_API_ANSWER_RESPONSE = 'Empty response from get_api_answer.'
+NO_GET_API_ANSWER_RESPONSE = 'Null or empty response from get_api_answer.'
+NO_HOMEWORKS_KEY_IN_RESPONSE = (
+    'Key "homeworks" not found in check_response argument'
+)
 SEND_ERROR_INFO_EXCEPTION = (
     f'An error occured during send error info to chat ({TELEGRAM_CHAT_ID})'
 )
 START_BOT_MESSAGE = 'Starting bot...'
+STOP_BOT_MESSAGE = ' Stoping bot... Reasone: Bad environment variables'
 
 
 def logger_init():
     """Инициализация настроек логирования..."""
-    handlers = [
-        logging.StreamHandler(stdout),
-        logging.FileHandler(LOG_PATH),
-    ]
     logging.basicConfig(
         format='%(asctime)s [%(levelname)s]  %(message)s',
         level=logging.DEBUG,
-        handlers=handlers,
+        handlers=[
+            logging.StreamHandler(stdout),
+            logging.FileHandler(LOG_PATH),
+        ],
     )
 
 
@@ -115,35 +119,33 @@ def get_api_answer(current_timestamp: int):
     JSON к типам данных Python.
     """
     params = {'from_date': current_timestamp}
-    response_details = {
+    request_details = {
         'url': ENDPOINT,
         'headers': HEADERS,
         'params': params
     }
     try:
-        response = requests.get(**response_details)
-    except requests.RequestException:
-        raise requests.ConnectionError(CONNECTION_ERROR_TEMPLATE.format(
-            **response_details
+        response = requests.get(**request_details)
+    except requests.RequestException as error:
+        raise ConnectionError(CONNECTION_ERROR_TEMPLATE.format(
+            error=error, **request_details
         ))
-    response_details.update({
-        'code': response.status_code,
-        'expected_code': SUCCESS_RESPONSE_CODE
-    })
     if response.status_code != SUCCESS_RESPONSE_CODE:
-        raise requests.HTTPError(WRONG_HTTP_RESPONSE_ERROR_TEMPLATE.format(
-            **response_details
+        raise WrongHttpCodeError(WRONG_HTTP_RESPONSE_ERROR_TEMPLATE.format(
+            **request_details,
+            code=response.status_code,
+            expected_code=SUCCESS_RESPONSE_CODE
         ))
     response_json = response.json()
     for error_key in ['error', 'code']:
         if error_key in response_json:
-            response_details.update({
-                'error_key': error_key,
-                'error_text': response_json.get(error_key)
-            })
-            raise requests.HTTPError(RESPONSE_ERROR_IN_JSON_TEMPLATE.format(
-                **response_details
-            ))
+            raise JsonDetectedResponseError(
+                RESPONSE_ERROR_IN_JSON_TEMPLATE.format(
+                    **request_details,
+                    error_key=error_key,
+                    error=response_json.get(error_key)
+                )
+            )
     return response_json
 
 
@@ -154,13 +156,15 @@ def check_response(response: dict):
     (он может быть и пустым), доступный в ответе API по ключу 'homeworks'
     """
     if not response:
-        raise IndexError(NO_GET_API_ANSWER_RESPONSE)
+        raise ValueError(NO_GET_API_ANSWER_RESPONSE)
     if not isinstance(response, dict):
         raise TypeError(WRONG_TYPE_MESSAGE_TEMPLATE.format(
             object='check_response argument',
             got=type(response),
             expected='dict'
         ))
+    if 'homeworks' not in response:
+        raise KeyError(NO_HOMEWORKS_KEY_IN_RESPONSE)
     homeworks = response['homeworks']
     if not isinstance(homeworks, list):
         raise TypeError(WRONG_TYPE_MESSAGE_TEMPLATE.format(
@@ -178,8 +182,6 @@ def parse_status(homework):
     отправки в Telegram строку, содержащую один из вердиктов словаря
     HOMEWORK_VERDICTS.
     """
-    if isinstance(homework, list):
-        homework = homework[0]
     homework_status = homework['status']
     homework_name = homework['homework_name']
     if homework_status not in HOMEWORK_VERDICTS:
@@ -197,43 +199,43 @@ def check_tokens():
     программы. Если отсутствует хотя бы одна переменная окружения — функция
     должна вернуть False, иначе — True.
     """
-    env_vars_correct = True
-    for name in ENV_VARS:
-        value = globals().get(name)
-        if value is None:
-            logging.critical(BAD_ENV_VAR_ERROR_TEMPLATE.format(name=name))
-            env_vars_correct = False
-    return env_vars_correct
+    missing_vars = [name for name in ENV_VARS if globals().get(name) is None]
+    if missing_vars:
+        logging.critical(BAD_ENV_VAR_ERROR_TEMPLATE.format(
+            vars=','.join(missing_vars)
+        ))
+        return False
+    return True
 
 
 def main():
     """Основная логика работы бота..."""
     logging.info(START_BOT_MESSAGE)
     if not check_tokens():
-        message = STOP_BOT_TEMPLATE.format(reasone='Bad environment variables')
-        logging.info(message)
-        raise ValueError(message)
+        logging.info(STOP_BOT_MESSAGE)
+        raise EnvironmentError(STOP_BOT_MESSAGE)
     bot = Bot(token=TELEGRAM_TOKEN)
-    last_error = None
-    current_timestamp = int(
-        (datetime.today() - timedelta(seconds=RETRY_TIME)).timestamp()
-    )
+    no_send_error = True
+    current_timestamp = 0
     while True:
         try:
             response = get_api_answer(current_timestamp)
-            homework = check_response(response)
-            if homework:
-                send_message(bot, parse_status(homework))
-            current_timestamp = response.get('current_date', current_timestamp)
-            last_error = None
+            homeworks = check_response(response)
+            if homeworks:
+                send_message(bot, parse_status(homeworks[0]))
+                current_timestamp = response.get(
+                    'current_date', current_timestamp
+                )
+                no_send_error = True
         except Exception as error:
-            logging.exception(LAST_FRONTIER_ERROR)
-            if last_error != str(error):
-                try:
-                    send_message(bot, str(error))
-                    last_error = str(error)
-                except Exception:
-                    logging.exception(SEND_ERROR_INFO_EXCEPTION)
+            logging.exception(LAST_FRONTIER_ERROR_TEMPLATE.format(
+                exception_type=type(error).__name__
+            ))
+            if no_send_error:
+                send_message(bot, LAST_FRONTIER_ERROR_TEMPLATE.format(
+                    exception_type=type(error).__name__
+                ))
+                no_send_error = False
         finally:
             time.sleep(RETRY_TIME)
 
