@@ -15,7 +15,7 @@ PRACTICUM_TOKEN = getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = getenv('TELEGRAM_CHAT_ID')
 ENV_VARS = ['PRACTICUM_TOKEN', 'TELEGRAM_CHAT_ID', 'TELEGRAM_TOKEN']
-RETRY_TIME = 600
+RETRY_TIME = 20
 SUCCESS_RESPONSE_CODE = 200
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
@@ -41,8 +41,7 @@ CONNECTION_ERROR_TEMPLATE = (
     'Error message: {error}'
 )
 LAST_FRONTIER_ERROR_TEMPLATE = (
-    'An exception {exception_type} was caught during the itteration. '
-    f'Details is in the server log "{LOG_PATH}".'
+    'An error occured during the itteration. Error text: {error}'
 )
 OK_SEND_MESSAGE_TEMPLATE = (
     'Message: "{message}" successfully send to chat ({chat_id})'
@@ -74,6 +73,9 @@ SEND_ERROR_INFO_EXCEPTION = (
 )
 START_BOT_MESSAGE = 'Starting bot...'
 STOP_BOT_MESSAGE = ' Stoping bot... Reasone: Bad environment variables'
+# текстовое описание объектов для подстановки в сообщение
+CHECK_RESPONSE_ARGUMENT_OBJECT = 'check_response argument'
+HOMEWORKS_INFO_OBJECT = 'homeworks info'
 
 
 def logger_init():
@@ -109,6 +111,7 @@ def send_message(bot, message):
             chat_id=TELEGRAM_CHAT_ID,
             error=error
         ))
+    return True
 
 
 def get_api_answer(current_timestamp: int):
@@ -128,7 +131,8 @@ def get_api_answer(current_timestamp: int):
         response = requests.get(**request_details)
     except requests.RequestException as error:
         raise ConnectionError(CONNECTION_ERROR_TEMPLATE.format(
-            error=error, **request_details
+            error=error,
+            **request_details
         ))
     if response.status_code != SUCCESS_RESPONSE_CODE:
         raise WrongHttpCodeError(WRONG_HTTP_RESPONSE_ERROR_TEMPLATE.format(
@@ -159,7 +163,7 @@ def check_response(response: dict):
         raise ValueError(NO_GET_API_ANSWER_RESPONSE)
     if not isinstance(response, dict):
         raise TypeError(WRONG_TYPE_MESSAGE_TEMPLATE.format(
-            object='check_response argument',
+            object=CHECK_RESPONSE_ARGUMENT_OBJECT,
             got=type(response),
             expected='dict'
         ))
@@ -168,7 +172,7 @@ def check_response(response: dict):
     homeworks = response['homeworks']
     if not isinstance(homeworks, list):
         raise TypeError(WRONG_TYPE_MESSAGE_TEMPLATE.format(
-            object='homeworks info',
+            object=HOMEWORKS_INFO_OBJECT,
             got=type(homeworks),
             expected='list'
         ))
@@ -201,9 +205,7 @@ def check_tokens():
     """
     missing_vars = [name for name in ENV_VARS if globals().get(name) is None]
     if missing_vars:
-        logging.critical(BAD_ENV_VAR_ERROR_TEMPLATE.format(
-            vars=','.join(missing_vars)
-        ))
+        logging.critical(BAD_ENV_VAR_ERROR_TEMPLATE.format(vars=missing_vars))
         return False
     return True
 
@@ -212,30 +214,29 @@ def main():
     """Основная логика работы бота..."""
     logging.info(START_BOT_MESSAGE)
     if not check_tokens():
-        logging.info(STOP_BOT_MESSAGE)
+        logging.critical(STOP_BOT_MESSAGE)
         raise EnvironmentError(STOP_BOT_MESSAGE)
     bot = Bot(token=TELEGRAM_TOKEN)
-    no_send_error = True
+    last_error = None
     current_timestamp = 0
     while True:
         try:
             response = get_api_answer(current_timestamp)
             homeworks = check_response(response)
-            if homeworks:
-                send_message(bot, parse_status(homeworks[0]))
+            if not homeworks:
+                continue
+            if send_message(bot, parse_status(homeworks[0])):
                 current_timestamp = response.get(
                     'current_date', current_timestamp
                 )
-                no_send_error = True
         except Exception as error:
-            logging.exception(LAST_FRONTIER_ERROR_TEMPLATE.format(
-                exception_type=type(error).__name__
-            ))
-            if no_send_error:
-                send_message(bot, LAST_FRONTIER_ERROR_TEMPLATE.format(
-                    exception_type=type(error).__name__
-                ))
-                no_send_error = False
+            logging.exception(LAST_FRONTIER_ERROR_TEMPLATE.format(error=error))
+            if last_error == str(error):
+                continue
+            if send_message(bot, LAST_FRONTIER_ERROR_TEMPLATE.format(
+                    error=error
+            )):
+                last_error = str(error)
         finally:
             time.sleep(RETRY_TIME)
 
