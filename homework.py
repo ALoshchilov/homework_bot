@@ -15,7 +15,7 @@ PRACTICUM_TOKEN = getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = getenv('TELEGRAM_CHAT_ID')
 ENV_VARS = ['PRACTICUM_TOKEN', 'TELEGRAM_CHAT_ID', 'TELEGRAM_TOKEN']
-RETRY_TIME = 20
+RETRY_TIME = 600
 SUCCESS_RESPONSE_CODE = 200
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
@@ -94,7 +94,8 @@ def send_message(bot, message):
     """
     Отправляет сообщение в Telegram чат, определяемый переменной окружения...
     TELEGRAM_CHAT_ID. Принимает на вход два параметра: экземпляр класса
-    Bot и строку с текстом сообщения.
+    Bot и строку с текстом сообщения. Возвращает True, если в ходе выполнения
+    не возникло исключений, и False, если исключение возникло
     """
     try:
         bot.send_message(
@@ -105,13 +106,14 @@ def send_message(bot, message):
             message=message,
             chat_id=TELEGRAM_CHAT_ID
         ))
+        return True
     except Exception as error:
         logging.exception(BAD_SEND_MESSAGE_TEMPLATE.format(
             message=message,
             chat_id=TELEGRAM_CHAT_ID,
             error=error
         ))
-    return True
+        return False
 
 
 def get_api_answer(current_timestamp: int):
@@ -223,22 +225,20 @@ def main():
         try:
             response = get_api_answer(current_timestamp)
             homeworks = check_response(response)
-            if not homeworks:
-                continue
-            if send_message(bot, parse_status(homeworks[0])):
+            if homeworks and send_message(bot, parse_status(homeworks[0])):
                 current_timestamp = response.get(
                     'current_date', current_timestamp
                 )
         except Exception as error:
-            logging.exception(LAST_FRONTIER_ERROR_TEMPLATE.format(error=error))
-            if last_error == str(error):
-                continue
-            if send_message(bot, LAST_FRONTIER_ERROR_TEMPLATE.format(
-                    error=error
-            )):
-                last_error = str(error)
-        finally:
-            time.sleep(RETRY_TIME)
+            error_message = LAST_FRONTIER_ERROR_TEMPLATE.format(
+                error=error
+            )
+            logging.exception(error_message)
+            if last_error != error_message and send_message(
+                bot, error_message
+            ):
+                last_error = error_message
+        time.sleep(RETRY_TIME)
 
 
 if __name__ == '__main__':
